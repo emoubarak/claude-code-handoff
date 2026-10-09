@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claude-code-handoff"
+version = "0.1.0"
+description = "Run Claude Code on OpenRouter, a local model or Anthropic, and resume the same session on any of them."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = []
+keywords = ["claude-code", "openrouter", "llama.cpp", "anthropic", "proxy", "local-llm"]
+classifiers = [
+  "Environment :: Console",
+  "Programming Language :: Python :: 3",
+  "Operating System :: POSIX",
+  "Topic :: Software Development",
+]
+
+[project.optional-dependencies]
+litellm = ["litellm"]
+
+[project.scripts]
+claude-handoff = "claude_handoff.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/emoubarak/claude-code-handoff"
+
+[tool.setuptools]
+packages = ["claude_handoff"]
