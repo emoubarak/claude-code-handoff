@@ -158,7 +158,8 @@ Run on Linux with Claude Code 2.1.295, against the live services:
 | That session (Anthropic, then OpenRouter) resumed with `claude-handoff anthropic --resume` | Works; the OpenRouter turns were stored without `requestId`. |
 | Session started on OpenRouter with the plain `ANTHROPIC_BASE_URL` setup, resumed with plain `claude --resume` | `400 diagnostics.previous_message_id ...` |
 | The same session resumed with `claude-handoff anthropic --resume` | Repaired 3 messages, then answered from the OpenRouter turn. |
-| Session resumed with `claude-handoff local` on llama-swap (Qwen3.6 35B-A3B, llama.cpp) | See below. |
+| That same session (Anthropic, OpenRouter, Anthropic) resumed with `claude-handoff local` on llama-swap (Qwen3.6 35B-A3B, llama.cpp) | Answered with the code word from the first Anthropic turn. Effort `xhigh` was sent as `enable_thinking: true`. Slow first turn (about 7 min on one 8 GB GPU with the experts on the CPU): Claude Code's prompt is long. |
+| Interactive session through `claude-handoff openrouter`: a message, `/model` set as default, `/exit` | Picker listed the real model id; `settings.json` was back to its previous default after exit; launcher exit code 0. |
 
 The unit and integration tests (`python3 -m unittest discover -s tests -t .`) cover the normalizer, the proxy against
 a fake upstream (rewrites, credentials, provider pinning, thinking toggle, streaming, errors), the transcript repair,
