@@ -137,6 +137,7 @@ The launcher starts the proxy on a free local port in a background thread, point
    So Alt+T and the effort slider in `/model` keep working.
 5. **Drops `request-id` headers on the way back.** Claude Code then records no `requestId` for these messages, and
    a session that went through this proxy returns to Anthropic without any repair (verified with OpenRouter).
+   LiteLLM 1.104 does not pass request ids either: its sessions came back to Anthropic unrepaired too.
 
 Streaming responses are relayed as they arrive.
 
@@ -191,6 +192,10 @@ Run on Linux with Claude Code 2.1.295, against the live services:
 | Interactive session through `claude-handoff openrouter`: a message, `/model` set as default, `/exit` | Picker listed the real model id; `settings.json` was back to its previous default after exit, permissions unchanged; launcher exit code 0. |
 | Inside that session, the model ran `env \| grep -ciE 'openrouter\|sk-or-\|CLAUDE_HANDOFF_LOCAL'` | `0` |
 | Proxy log after these sessions | No refused request: Claude Code only used the three allowed endpoints. |
+| Session started on Anthropic, resumed by plain Claude Code through a LiteLLM 1.104 proxy (`anthropic/` model, OpenRouter as `api_base`) **without** the callback | `400 Invalid Anthropic Messages API request` |
+| The same, **with** `claude_handoff.litellm_callback.handler` | Answered with the code word from the Anthropic turn. |
+| That session, then a session recorded through LiteLLM's `openrouter/` route, resumed on Anthropic with plain `claude --resume` | Both worked without repair (LiteLLM stores no `requestId`). |
+| `claude-handoff local --url <LiteLLM> --no-thinking-toggle` with the master key in `CLAUDE_HANDOFF_LOCAL_API_KEY` | Answered. |
 
 The unit and integration tests (`python3 -m unittest discover -s tests -t .`) cover the normalizer; the proxy against
 a fake upstream (rewrites, credentials, token, `Origin` and `Host` checks, allowed endpoints, CORS headers, provider
@@ -242,7 +247,9 @@ from claude_handoff.compat import normalize
 normalize(request_body)   # in place; harmless on requests that need nothing
 ```
 
-With a LiteLLM proxy, add the callback (see [examples/litellm/config.yaml](examples/litellm/config.yaml)):
+With a LiteLLM proxy that forwards in Anthropic format (an `anthropic/...` model with an Anthropic-compatible
+`api_base`), add the callback (see [examples/litellm/config.yaml](examples/litellm/config.yaml) and
+[Verified](#verified)):
 
 ```yaml
 litellm_settings:
