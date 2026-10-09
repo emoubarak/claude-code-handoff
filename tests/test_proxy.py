@@ -344,6 +344,9 @@ class SecurityTest(ProxyTestCase):
 
     def test_log_and_dump_are_private(self):
         dump = os.path.join(self.tmp.name, "dump.jsonl")
+        with open(self.log, "w"):
+            pass
+        os.chmod(self.log, 0o644)  # left by an older version
         upstream = FakeUpstream(status=400)
         port = self.run_proxy(upstream, dump_path=dump)
         post(port, "/v1/messages", {"model": "m", "messages": []})

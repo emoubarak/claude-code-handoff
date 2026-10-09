@@ -23,6 +23,7 @@ The proxy spends the upstream key on behalf of whoever reaches it, so it only an
 CORS headers from the upstream are dropped, so a browser never gets permission to read a response.
 """
 
+import contextlib
 import hmac
 import http.client
 import json
@@ -131,6 +132,8 @@ class Log:
         with self.lock:
             try:
                 fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+                with contextlib.suppress(OSError):
+                    os.fchmod(fd, 0o600)  # also for a file created by an older version
                 with os.fdopen(fd, "a", encoding="utf-8") as file:
                     file.write(line)
             except OSError:
