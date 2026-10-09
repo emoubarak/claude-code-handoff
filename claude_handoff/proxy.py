@@ -18,6 +18,7 @@ Everything else (other paths, other methods, streaming responses) is passed thro
 import http.client
 import json
 import os
+import socketserver
 import sys
 import threading
 import time
@@ -217,18 +218,26 @@ def _error_detail(body):
         return body.decode("utf-8", errors="replace")[:500]
 
 
+class LocalServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer without the reverse DNS lookup it does at bind time (seconds on some macOS setups)."""
+
+    daemon_threads = True
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
 def start(config, host="127.0.0.1", port=0):
     """Start the proxy in a background thread. Returns the server; its port is ``server.server_address[1]``."""
-    server = ThreadingHTTPServer((host, port), make_handler(config))
-    server.daemon_threads = True
+    server = LocalServer((host, port), make_handler(config))
     threading.Thread(target=server.serve_forever, name="claude-handoff-proxy", daemon=True).start()
     return server
 
 
 def serve(config, host="127.0.0.1", port=8787):
     """Run the proxy in the foreground (``claude-handoff proxy``)."""
-    server = ThreadingHTTPServer((host, port), make_handler(config))
-    server.daemon_threads = True
+    server = LocalServer((host, port), make_handler(config))
     print(f"claude-handoff proxy: http://{host}:{server.server_address[1]} -> {config.upstream}", file=sys.stderr)
     print(f"  export ANTHROPIC_BASE_URL=http://{host}:{server.server_address[1]}", file=sys.stderr)
     try:

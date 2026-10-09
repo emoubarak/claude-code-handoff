@@ -2,9 +2,10 @@ import http.client
 import json
 import threading
 import unittest
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 
 from claude_handoff import proxy
+from claude_handoff.proxy import LocalServer
 
 
 class FakeUpstream:
@@ -50,7 +51,7 @@ class FakeUpstream:
                     self.end_headers()
                     self.wfile.write(data)
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server = LocalServer(("127.0.0.1", 0), Handler)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}/api"
 

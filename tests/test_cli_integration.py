@@ -10,7 +10,9 @@ import textwrap
 import threading
 import time
 import unittest
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
+
+from claude_handoff.proxy import LocalServer
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -65,7 +67,7 @@ class FakeServer:
                 outer.requests.append({"headers": dict(self.headers), "body": body})
                 self._send({"id": "local-msg", "type": "message"})
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server = LocalServer(("127.0.0.1", 0), Handler)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
 
@@ -98,8 +100,16 @@ class LauncherTest(unittest.TestCase):
         }
 
     def launch(self, *args, **env):
-        return subprocess.Popen([sys.executable, "-m", "claude_handoff", *args], env={**self.env, **env}, cwd=ROOT,
-                                start_new_session=True)
+        process = subprocess.Popen([sys.executable, "-m", "claude_handoff", *args], env={**self.env, **env}, cwd=ROOT,
+                                   start_new_session=True)
+        self.addCleanup(self.stop, process)
+        return process
+
+    @staticmethod
+    def stop(process):
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
 
     def wait_ready(self):
         deadline = time.time() + 15
