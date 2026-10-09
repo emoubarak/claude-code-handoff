@@ -2,6 +2,8 @@
 
 # claude-code-handoff
 
+[![tests](https://github.com/emoubarak/claude-code-handoff/actions/workflows/tests.yml/badge.svg)](https://github.com/emoubarak/claude-code-handoff/actions/workflows/tests.yml)
+
 Run Claude Code on **OpenRouter**, on a **local model** (llama.cpp, llama-swap, vLLM, LiteLLM) or on **Anthropic**, and
 `--resume` the same session on any of them. Start a task on Claude, continue it on a cheap OpenRouter model, finish it
 on your own GPU, come back to Claude: the conversation follows.
