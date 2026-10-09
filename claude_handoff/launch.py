@@ -135,7 +135,7 @@ def run(config, model, models, claude_args, capabilities=None):
         restore_default_model(settings, before, {model_id for model_id, _ in models})
         server.shutdown()
         server.server_close()
-    return code
+    return 128 - code if code < 0 else code  # killed by a signal: exit like a shell would (SIGTERM -> 143)
 
 
 def run_anthropic(claude_args):
