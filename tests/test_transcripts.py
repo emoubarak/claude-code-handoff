@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import os
 import tempfile
@@ -79,6 +81,65 @@ class FixTranscriptsTest(unittest.TestCase):
         os.utime(other, (old, old))
         self.assertEqual(transcripts.fix_all(projects, stamp=stamp, quiet=True), 0)
         self.assertEqual(transcripts.fix_all(projects, quiet=True), 1)
+
+    def test_dry_run_changes_nothing(self):
+        os.makedirs(os.path.join(self.root, "projects", "p"))
+        path = os.path.join(self.root, "projects", "p", "s.jsonl")
+        with open(path, "wb") as file:
+            file.write(line(USER) + line(FOREIGN))
+        before = read(path)
+        stamp = os.path.join(self.root, "state", "stamp")
+        self.assertEqual(transcripts.fix_all(os.path.join(self.root, "projects"), stamp=stamp, quiet=True,
+                                             dry_run=True), 1)
+        self.assertEqual(read(path), before)
+        self.assertFalse(os.path.exists(stamp))
+
+    def test_original_is_backed_up_before_the_change(self):
+        projects = os.path.join(self.root, "projects")
+        os.makedirs(os.path.join(projects, "p"))
+        path = os.path.join(projects, "p", "s.jsonl")
+        with open(path, "wb") as file:
+            file.write(line(USER) + line(FOREIGN))
+        before = read(path)
+        backups = os.path.join(self.root, "backups")
+        self.assertEqual(transcripts.fix_all(projects, quiet=True, backup_dir=backups), 1)
+        runs = os.listdir(backups)
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(read(os.path.join(backups, runs[0], "p", "s.jsonl")), before)
+        self.assertNotEqual(read(path), before)
+
+    def test_failed_backup_leaves_the_file_alone(self):
+        path = self.write("s.jsonl", [USER, FOREIGN])
+        before = read(path)
+        blocker = os.path.join(self.root, "not-a-dir")
+        with open(blocker, "w"):
+            pass
+        with self.assertRaises(OSError):
+            transcripts.fix_file(path, backup_to=os.path.join(blocker, "s.jsonl"))
+        self.assertEqual(read(path), before)
+
+    def test_stamp_does_not_move_when_a_file_fails(self):
+        projects = os.path.join(self.root, "projects")
+        os.makedirs(projects)
+        good = os.path.join(projects, "good.jsonl")
+        bad = os.path.join(projects, "bad.jsonl")
+        for path in (good, bad):
+            with open(path, "wb") as file:
+                file.write(line(FOREIGN))
+        os.chmod(bad, 0o000)
+        stamp = os.path.join(self.root, "state", "stamp")
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(transcripts.fix_all(projects, stamp=stamp, quiet=True), 1)
+        self.assertFalse(os.path.exists(stamp))
+        os.chmod(bad, 0o600)
+        self.assertEqual(transcripts.fix_all(projects, stamp=stamp, quiet=True), 1)
+        self.assertTrue(os.path.exists(stamp))
+
+    def test_litellm_style_entries_are_left_alone(self):
+        # LiteLLM stores no requestId and an id that starts with msg_: nothing for this rule to change.
+        entry = {"type": "assistant", "requestId": None, "message": {"id": "msg_5b501c9d-0225-4eb3-a7e0-0cad99cf4135"}}
+        path = self.write("s.jsonl", [USER, entry])
+        self.assertEqual(transcripts.fix_file(path), 0)
 
     def test_missing_folder(self):
         self.assertEqual(transcripts.fix_all(os.path.join(self.root, "nope"), quiet=True), 0)

@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import secrets
 import sys
 
 from . import __version__, launch, proxy, transcripts
@@ -158,37 +159,53 @@ def cmd_fix_transcripts(args):
     parser = argparse.ArgumentParser(prog="claude-handoff fix-transcripts",
                                      description="Repair transcripts so the sessions resume on the Anthropic API.")
     parser.add_argument("folder", nargs="?", help="default: Claude Code's projects folder")
+    parser.add_argument("--dry-run", action="store_true", help="only list what would change")
+    parser.add_argument("--no-backup", action="store_true",
+                        help="do not copy changed files to the state folder first")
     options = parser.parse_args(args)
-    total = transcripts.fix_all(options.folder)
-    print(f"claude-handoff: {total} message(s) fixed", file=sys.stderr)
+    backup_dir = None if options.no_backup else os.path.join(proxy.state_dir(), "backups")
+    total = transcripts.fix_all(options.folder, dry_run=options.dry_run, backup_dir=backup_dir)
+    verb = "would be fixed" if options.dry_run else "fixed"
+    print(f"claude-handoff: {total} message(s) {verb}", file=sys.stderr)
+    if total and backup_dir and not options.dry_run:
+        print(f"claude-handoff: originals saved under {backup_dir}", file=sys.stderr)
     return 0
 
 
 def cmd_proxy(args):
-    parser = argparse.ArgumentParser(prog="claude-handoff proxy",
-                                     description="Run the proxy in the foreground.")
+    parser = argparse.ArgumentParser(
+        prog="claude-handoff proxy",
+        description="Run the proxy in the foreground. Clients must send its token "
+                    "(ANTHROPIC_AUTH_TOKEN for Claude Code).")
     parser.add_argument("--upstream", required=True, help="Anthropic-compatible base URL, e.g. " + OPENROUTER_URL)
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--host", default="127.0.0.1", help="default 127.0.0.1; anything else needs --allow-remote")
     parser.add_argument("--port", type=int, default=8787)
+    parser.add_argument("--allow-remote", action="store_true",
+                        help="allow listening beyond loopback (the token is then the only protection)")
     parser.add_argument("--api-key-env", metavar="NAME", help="environment variable holding the upstream key")
     parser.add_argument("--route", help="model=provider,... (OpenRouter provider pinning)")
     parser.add_argument("--thinking-toggle", action="store_true",
                         help="translate thinking/effort into chat_template_kwargs.enable_thinking")
-    parser.add_argument("--log", help="append upstream errors to this file (default: stderr is silent)")
-    parser.add_argument("--dump", help="append every rewritten request to this file")
+    parser.add_argument("--log", help="upstream errors and refused requests (default: the state folder's proxy.log)")
+    parser.add_argument("--dump", help="append every rewritten request (full conversation!) to this file")
     options = parser.parse_args(args)
     key = os.environ.get(options.api_key_env) if options.api_key_env else None
     if options.api_key_env and not key:
         sys.exit(f"claude-handoff: {options.api_key_env} is not set")
+    token = os.environ.get("CLAUDE_HANDOFF_PROXY_TOKEN") or secrets.token_urlsafe(32)
     config = proxy.ProxyConfig(
         upstream=options.upstream,
         api_key=key,
+        client_token=token,
         routes=launch.parse_routes(options.route),
         thinking_toggle=options.thinking_toggle,
-        log_path=options.log,
+        log_path=options.log or os.path.join(proxy.state_dir(), "proxy.log"),
         dump_path=options.dump,
     )
-    proxy.serve(config, options.host, options.port)
+    try:
+        proxy.serve(config, options.host, options.port, allow_remote=options.allow_remote)
+    except ValueError as error:
+        sys.exit(f"claude-handoff: {error}")
     return 0
 
 
