@@ -1,13 +1,19 @@
-# LiteLLM proxy in front of any provider, with claude-handoff's request cleanup.
-# pip install "litellm[proxy]" git+https://github.com/emoubarak/claude-code-handoff   (same environment)
-# litellm --config config.yaml --port 4000
-# then: CLAUDE_HANDOFF_LOCAL_API_KEY=<litellm master key> claude-handoff local --url http://127.0.0.1:4000 --no-thinking-toggle
+# LiteLLM proxy with claude-handoff's request cleanup.
+#
+# The callback matters when LiteLLM forwards Claude Code's requests in Anthropic format, that is an `anthropic/...`
+# model with an Anthropic-compatible `api_base` (OpenRouter's below). Without it, such an upstream rejects a session
+# started on Anthropic with "Invalid Anthropic Messages API request". Models LiteLLM translates to the OpenAI format
+# do not need it.
+#
+#   pip install "litellm[proxy]" git+https://github.com/emoubarak/claude-code-handoff   (same environment)
+#   LITELLM_MASTER_KEY=sk-choose-one litellm --config config.yaml --port 4000
+#   CLAUDE_HANDOFF_LOCAL_API_KEY=sk-choose-one claude-handoff local --url http://127.0.0.1:4000 --no-thinking-toggle
 model_list:
-  - model_name: my-model
+  - model_name: deepseek-flash
     litellm_params:
-      model: openai/my-model            # any LiteLLM provider/model
-      api_base: https://example.com/v1
-      api_key: os.environ/MY_PROVIDER_KEY
+      model: anthropic/deepseek/deepseek-v4.1-flash
+      api_base: https://openrouter.ai/api
+      api_key: os.environ/OPENROUTER_API_KEY
 
 litellm_settings:
   drop_params: true
