@@ -1,0 +1,14 @@
+# LiteLLM proxy in front of any provider, with claude-handoff's request cleanup.
+# pip install "litellm[proxy]" git+https://github.com/emoubarak/claude-code-handoff   (same environment)
+# litellm --config config.yaml --port 4000
+# then: CLAUDE_HANDOFF_LOCAL_API_KEY=<litellm master key> claude-handoff local --url http://127.0.0.1:4000 --no-thinking-toggle
+model_list:
+  - model_name: my-model
+    litellm_params:
+      model: openai/my-model            # any LiteLLM provider/model
+      api_base: https://example.com/v1
+      api_key: os.environ/MY_PROVIDER_KEY
+
+litellm_settings:
+  drop_params: true
+  callbacks: claude_handoff.litellm_callback.handler

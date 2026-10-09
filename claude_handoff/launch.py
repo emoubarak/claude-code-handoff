@@ -127,8 +127,9 @@ def run(config, model, models, claude_args, capabilities=None):
         except ProcessLookupError:
             pass
 
-    for signum in (signal.SIGTERM, signal.SIGHUP):
-        signal.signal(signum, forward)
+    for name in ("SIGTERM", "SIGHUP"):  # SIGHUP: the terminal was closed
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), forward)
     try:
         code = child.wait()
     finally:
