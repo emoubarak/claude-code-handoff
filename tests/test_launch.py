@@ -30,7 +30,7 @@ class RestoreDefaultModelTest(unittest.TestCase):
 
     def test_restores_previous_model(self):
         self.write({"model": "provider/model-b", "theme": "dark"})
-        self.assertTrue(launch.restore_default_model(self.path, "opus", {"provider/model-a", "provider/model-b"}))
+        self.assertEqual(launch.restore_default_model(self.path, "opus", {"provider/model-a", "provider/model-b"}), "restored")
         self.assertEqual(self.read(), {"model": "opus", "theme": "dark"})
 
     def test_removes_key_when_there_was_none(self):
@@ -40,11 +40,11 @@ class RestoreDefaultModelTest(unittest.TestCase):
 
     def test_leaves_unrelated_models_alone(self):
         self.write({"model": "sonnet"})
-        self.assertFalse(launch.restore_default_model(self.path, "opus", {"provider/model-a"}))
+        self.assertEqual(launch.restore_default_model(self.path, "opus", {"provider/model-a"}), "unchanged")
         self.assertEqual(self.read(), {"model": "sonnet"})
 
     def test_missing_file(self):
-        self.assertFalse(launch.restore_default_model(self.path, "opus", {"x"}))
+        self.assertEqual(launch.restore_default_model(self.path, "opus", {"x"}), "unchanged")
 
     def test_symlink_permissions_and_no_leftovers(self):
         real_dir = os.path.join(self.dir.name, "dotfiles")
@@ -54,7 +54,7 @@ class RestoreDefaultModelTest(unittest.TestCase):
             json.dump({"model": "provider/model-a"}, file)
         os.chmod(real, 0o600)
         os.symlink(real, self.path)
-        self.assertTrue(launch.restore_default_model(self.path, "opus", {"provider/model-a"}))
+        self.assertEqual(launch.restore_default_model(self.path, "opus", {"provider/model-a"}), "restored")
         self.assertTrue(os.path.islink(self.path))
         self.assertEqual(stat.S_IMODE(os.stat(real).st_mode), 0o600)
         self.assertEqual(self.read(), {"model": "opus"})
@@ -67,7 +67,7 @@ class RestoreDefaultModelTest(unittest.TestCase):
         stderr = io.StringIO()
         try:
             with contextlib.redirect_stderr(stderr):
-                self.assertFalse(launch.restore_default_model(self.path, "opus", {"provider/model-a"}))
+                self.assertEqual(launch.restore_default_model(self.path, "opus", {"provider/model-a"}), "failed")
         finally:
             os.chmod(self.dir.name, 0o700)
         self.assertIn("could not restore", stderr.getvalue())
@@ -152,6 +152,28 @@ class DefaultModelGuardTest(unittest.TestCase):
         self.assertEqual(self.model(), "opus")
         self.assertTrue(os.path.exists(first.record))
 
+    def test_record_is_kept_until_the_restore_succeeds(self):
+        guard = self.guard()
+        guard.enter(["p/a"])
+        self.set_model("p/a")
+        os.chmod(self.dir.name, 0o500)  # settings.json cannot be replaced
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                guard.exit()
+            self.assertEqual(self.model(), "p/a")
+            self.assertTrue(os.path.exists(guard.record))
+            with open(guard.record) as file:
+                self.assertEqual(json.load(file)["before"], "opus")
+            with contextlib.redirect_stderr(io.StringIO()), mock.patch.object(launch, "_alive", return_value=False):
+                guard.recover()  # still read-only: the record must survive this too
+            self.assertTrue(os.path.exists(guard.record))
+        finally:
+            os.chmod(self.dir.name, 0o700)
+        with mock.patch.object(launch, "_alive", return_value=False):
+            guard.recover()
+        self.assertEqual(self.model(), "opus")
+        self.assertFalse(os.path.exists(guard.record))
+
     def test_user_choice_of_an_anthropic_model_is_kept(self):
         guard = self.guard()
         guard.enter(["p/a"])
@@ -162,18 +184,32 @@ class DefaultModelGuardTest(unittest.TestCase):
 
 class EnvironmentTest(unittest.TestCase):
     def test_upstream_credentials_do_not_reach_claude(self):
-        environ = {"PATH": "/bin", "OPENROUTER_API_KEY": "sk-or-secret", "CLAUDE_HANDOFF_LOCAL_API_KEY": "local-secret",
-                   "ANTHROPIC_API_KEY": "sk-ant", "MY_COPY": "sk-or-secret", "CLAUDE_HANDOFF_PROXY_TOKEN": "t",
+        environ = {"PATH": "/bin", "OPENROUTER_API_KEY": "fake-openrouter-key-for-tests", "CLAUDE_HANDOFF_LOCAL_API_KEY": "local-secret",
+                   "ANTHROPIC_API_KEY": "sk-ant", "MY_COPY": "fake-openrouter-key-for-tests", "CLAUDE_HANDOFF_PROXY_TOKEN": "t",
                    "UNRELATED": "keep"}
         with mock.patch.dict(os.environ, environ, clear=True):
-            env = launch.claude_environment("http://127.0.0.1:1", "tok", "m", secrets_to_drop=("sk-or-secret",))
+            env = launch.claude_environment("http://127.0.0.1:1", "tok", "m", secrets_to_drop=("fake-openrouter-key-for-tests",))
         for name in ("OPENROUTER_API_KEY", "CLAUDE_HANDOFF_LOCAL_API_KEY", "ANTHROPIC_API_KEY", "MY_COPY",
                      "CLAUDE_HANDOFF_PROXY_TOKEN"):
             self.assertNotIn(name, env)
-        self.assertNotIn("sk-or-secret", json.dumps(env))
+        self.assertNotIn("fake-openrouter-key-for-tests", json.dumps(env))
         self.assertEqual(env["UNRELATED"], "keep")
         self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "tok")
         self.assertEqual(env["ANTHROPIC_BASE_URL"], "http://127.0.0.1:1")
+
+    def test_oauth_token_is_dropped(self):
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat-something-long"}, clear=True):
+            env = launch.claude_environment("http://127.0.0.1:1", "tok", "m")
+        self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", env)
+
+    def test_short_key_values_do_not_remove_unrelated_variables(self):
+        environ = {"DISABLE_TELEMETRY": "1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+                   "DISABLE_AUTOUPDATER": "1", "SHLVL": "1", "CLAUDE_HANDOFF_LOCAL_API_KEY": "1"}
+        with mock.patch.dict(os.environ, environ, clear=True):
+            env = launch.claude_environment("http://127.0.0.1:1", "tok", "m", secrets_to_drop=("1",))
+        for name in ("DISABLE_TELEMETRY", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "DISABLE_AUTOUPDATER", "SHLVL"):
+            self.assertEqual(env[name], "1")
+        self.assertNotIn("CLAUDE_HANDOFF_LOCAL_API_KEY", env)  # still dropped by name
 
 
 class ParsingTest(unittest.TestCase):

@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 import os
+import stat
 import tempfile
 import time
 import unittest
@@ -72,6 +73,7 @@ class FixTranscriptsTest(unittest.TestCase):
         stamp = os.path.join(self.root, "state", "stamp")
         projects = os.path.join(self.root, "projects")
         self.assertEqual(transcripts.fix_all(projects, stamp=stamp, quiet=True), 1)
+        self.assertEqual(stat.S_IMODE(os.stat(stamp).st_mode), 0o600)
         self.assertEqual(transcripts.fix_all(projects, stamp=stamp, quiet=True), 0)
         # A file older than the stamp is not read again, even if it still has a foreign id.
         other = os.path.join(self.root, "projects", "p", "old.jsonl")

@@ -5,6 +5,7 @@ import json
 import os
 import socket
 import stat
+import sys
 import tempfile
 import threading
 import unittest
@@ -332,6 +333,57 @@ class SecurityTest(ProxyTestCase):
             response, _ = request(port, method, path, {"model": "m", "messages": []})
             self.assertIn(response.status, (404, 501), f"{method} {path}")
         self.assertEqual(upstream.requests, [])
+
+    def test_dot_segments_cannot_reach_other_endpoints(self):
+        upstream = FakeUpstream()
+        port = self.run_proxy(upstream, api_key="sk-upstream")
+        for path in ("/v1/models/../../v1/credits", "/v1/models/%2e%2e/%2e%2e/v1/credits",
+                     "/v1/models/%2E%2E/credits", "/v1/models/..%2f..%2fv1%2fcredits", "/v1/models/%252e%252e/x",
+                     "/v1/models/./x", "/v1/messages/../models", "/v1/%6dessages"):
+            method = "POST" if "messages" in path else "GET"
+            response, _ = request(port, method, path, {"model": "m", "messages": []} if method == "POST" else None)
+            self.assertEqual(response.status, 404, path)
+        self.assertEqual(upstream.requests, [])
+        response, _ = request(port, "GET", "/v1/models/deepseek/deepseek-v4.1-flash")
+        self.assertEqual(response.status, 200)  # model ids with a slash still work
+
+    def test_non_object_json_body_gets_400(self):
+        upstream = FakeUpstream()
+        port = self.run_proxy(upstream)
+        for body in ([1, 2], "text", 3, None):
+            response, _ = post(port, "/v1/messages", body if body is not None else "null")
+            self.assertEqual(response.status, 400, body)
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        connection.request("POST", "/v1/messages", body=b"{not json",
+                           headers={"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"})
+        self.assertEqual(connection.getresponse().status, 400)
+        connection.close()
+        self.assertEqual(upstream.requests, [])
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "127.0.0.2 is only routable by default on Linux")
+    def test_other_loopback_address_accepts_its_own_host(self):
+        upstream = FakeUpstream()
+        self.addCleanup(upstream.close)
+        config = proxy.ProxyConfig(upstream=upstream.url, client_token=TOKEN, log_path=self.log)
+        server = proxy.start(config, host="127.0.0.2")
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        port = server.server_address[1]
+        connection = http.client.HTTPConnection("127.0.0.2", port, timeout=10)
+        connection.request("POST", "/v1/messages", body=json.dumps({"model": "m", "messages": []}),
+                           headers={"Authorization": f"Bearer {TOKEN}"})
+        self.assertEqual(connection.getresponse().status, 200)
+        connection.close()
+
+    def test_wildcard_address_is_not_printed_as_usable(self):
+        config = proxy.ProxyConfig(upstream="http://127.0.0.1:9", client_token=TOKEN)
+        stderr = io.StringIO()
+        with mock.patch.object(proxy.LocalServer, "serve_forever"), contextlib.redirect_stderr(stderr):
+            proxy.serve(config, host="0.0.0.0", port=0, allow_remote=True)
+        output = stderr.getvalue()
+        self.assertNotIn("ANTHROPIC_BASE_URL=http://0.0.0.0", output)
+        self.assertIn("replace", output)
+        self.assertIn(f"ANTHROPIC_AUTH_TOKEN={TOKEN}", output)
 
     def test_cors_and_cookies_are_not_passed_back(self):
         upstream = FakeUpstream()

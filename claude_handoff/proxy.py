@@ -28,6 +28,7 @@ import hmac
 import http.client
 import json
 import os
+import socket
 import socketserver
 import sys
 import threading
@@ -35,7 +36,7 @@ import time
 import traceback
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from .compat import normalize
 
@@ -97,8 +98,17 @@ def rewrite(payload, config, endpoint):
 
 
 def route(command, path):
-    """The endpoint a request is for, or None if the proxy does not serve it."""
+    """The endpoint a request is for, or None if the proxy does not serve it.
+
+    The path is checked decoded, and dot segments are refused, so ``/v1/models/../../v1/credits`` (or its
+    ``%2e%2e`` spelling) cannot reach another upstream endpoint with the key attached.
+    """
     path = path.split("?", 1)[0]
+    decoded = unquote(path)
+    if "%" in decoded or "\\" in decoded or any(segment in (".", "..") for segment in decoded.split("/")):
+        return None
+    if decoded != path and not path.startswith("/v1/models/"):
+        return None  # only model ids may need escaping
     if command == "POST" and path == "/v1/messages":
         return "messages"
     if command == "POST" and path == "/v1/messages/count_tokens":
@@ -191,7 +201,9 @@ def make_handler(config):
                 try:
                     payload = json.loads(body)
                 except (UnicodeDecodeError, json.JSONDecodeError):
-                    self.send_error(400, "Messages request body must be JSON")
+                    payload = None
+                if not isinstance(payload, dict):
+                    self._refuse(400, "Messages request body must be a JSON object")
                     return
                 if config.dump_path:
                     before = json.loads(body)
@@ -301,10 +313,11 @@ class LocalServer(ThreadingHTTPServer):
         self.allowed_hosts = None
         super().__init__(address, handler)
         if check_host:
-            port = self.server_address[1]
-            self.allowed_hosts = {f"{name}:{port}" for name in LOOPBACK_NAMES}
+            bound, port = self.server_address[:2]
+            names = {*LOOPBACK_NAMES, bound}
+            self.allowed_hosts = {f"{name}:{port}" for name in names}
             if port == 80:
-                self.allowed_hosts |= set(LOOPBACK_NAMES)
+                self.allowed_hosts |= names
 
     def server_bind(self):
         socketserver.TCPServer.server_bind(self)
@@ -330,11 +343,16 @@ def serve(config, host="127.0.0.1", port=8787, allow_remote=False):
         raise ValueError(f"refusing to listen on {host}: anyone who can reach it with the token spends your key "
                          "(pass --allow-remote if that is what you want)")
     server = LocalServer((host, port), make_handler(config), log_path=config.log_path, check_host=not remote)
-    address = f"http://{host}:{server.server_address[1]}"
-    print(f"claude-handoff proxy: {address} -> {config.upstream}", file=sys.stderr)
+    port = server.server_address[1]
+    wildcard = host in ("0.0.0.0", "::", "")
+    shown = socket.gethostname() if wildcard else host
+    print(f"claude-handoff proxy: listening on {host}:{port} -> {config.upstream}", file=sys.stderr)
     if remote:
         print("  warning: listening beyond loopback; the token is the only protection", file=sys.stderr)
-    print(f"  export ANTHROPIC_BASE_URL={address}", file=sys.stderr)
+    if wildcard:
+        print(f"  {host} is not an address clients can use: replace {shown} below with any address of this "
+              "machine they can reach", file=sys.stderr)
+    print(f"  export ANTHROPIC_BASE_URL=http://{shown}:{port}", file=sys.stderr)
     print(f"  export ANTHROPIC_AUTH_TOKEN={config.client_token}", file=sys.stderr)
     try:
         server.serve_forever()

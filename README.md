@@ -11,7 +11,7 @@ on your own GPU, come back to Claude: the conversation follows.
 - One small command per provider, nothing to keep running: the proxy lives for the length of the session.
 - `/model` lists the provider's real model ids, not Anthropic aliases. (Background requests that ask for `haiku`,
   `sonnet` or `opus` go to the model you launched with, see [the model picker](#how-it-works).)
-- Your API key stays out of Claude Code's reach, and the local proxy only serves the Claude Code it started.
+- Your API key is not in Claude Code's environment, and the local proxy only serves the Claude Code it started.
 - Python 3.10+, standard library only, no config file.
 
 ## The two errors it fixes
@@ -127,9 +127,9 @@ The launcher starts the proxy on a free local port in a background thread, point
    `tool_result` blocks, which must stay first); the `tool_addition` / `tool_removal` blocks are dropped, since the
    request's `tools` list already reflects them. Other requests pass through unchanged.
 2. **Holds the API key.** The proxy sends the real key upstream. Claude Code gets a random token, valid for this
-   launch only, and runs without `OPENROUTER_API_KEY`, `CLAUDE_HANDOFF_LOCAL_API_KEY`, `ANTHROPIC_API_KEY` or any
-   other variable holding the key: a model that runs `env` cannot read it into the conversation. See
-   [Security](#security).
+   launch only, and runs without `OPENROUTER_API_KEY`, `CLAUDE_HANDOFF_LOCAL_API_KEY`, `ANTHROPIC_API_KEY`,
+   `CLAUDE_CODE_OAUTH_TOKEN` or any other variable holding the key, so `env` inside the session does not show it.
+   See [Security](#security) for what this does and does not cover.
 3. **Optionally pins a provider** on OpenRouter (`--route`): `provider: {"only": [...], "allow_fallbacks": false}`.
 4. **Translates thinking for local models** (`local`, on by default). Claude Code expresses reasoning as `thinking` and
    `output_config.effort`; llama.cpp and vLLM chat templates (Qwen3 and others) only know
@@ -168,13 +168,27 @@ The proxy holds a key that costs money, so it is locked to the Claude Code proce
 - **No browsers.** Requests carrying an `Origin` header, or a `Host` other than `127.0.0.1` / `localhost` on the
   proxy's port, get `403`: a web page cannot use the proxy, even through DNS rebinding. The upstream's CORS and
   cookie headers are dropped.
-- **Three endpoints.** `POST /v1/messages`, `POST /v1/messages/count_tokens` and `GET /v1/models`. Anything else gets
-  `404` or `501`.
-- **Loopback only.** The launchers always listen on `127.0.0.1`. The standalone `proxy` refuses another `--host`
-  unless you add `--allow-remote`, and then the token is the only protection.
+- **Three endpoints.** `POST /v1/messages`, `POST /v1/messages/count_tokens` and `GET /v1/models`, checked after
+  decoding, with `.` and `..` segments refused. Anything else gets `404` or `501`.
+- **Loopback only.** The launchers always listen on `127.0.0.1`. The standalone `proxy` refuses a non-loopback
+  `--host` unless you add `--allow-remote`, and then the token is the only protection.
+- **A closed launcher (Linux).** Claude Code and the commands it runs use your account, so they could read the
+  launcher's `/proc/<pid>/environ`, where the key is. The launcher (and the standalone `proxy`) marks itself
+  non-dumpable with `prctl(PR_SET_DUMPABLE, 0)`: its environment and memory then belong to root. The flag does not
+  survive `execve`, so `claude` runs as usual.
 
-What remains: the per-launch token is in Claude Code's environment, so a model can read it. It only opens this proxy,
-from this machine, while that Claude Code session runs.
+What remains, and what this tool cannot fix:
+
+- The per-launch token is in Claude Code's environment, so the model can read it. It only opens this proxy, from this
+  machine, while that Claude Code session runs.
+- The model runs commands under your account and can read whatever you can: a shell rc file or a `.env` holding the
+  key, and the environment of any other process that has it. If you export the key in your shell, the shell that
+  started the launcher has it, and the model can read it there: we checked, by walking up the process tree from a
+  command run inside a session (the launcher answered `Permission denied`, the shells above it did not). Keeping the
+  key out of your exported environment (for example `OPENROUTER_API_KEY=$(pass show openrouter) claude-handoff
+  openrouter`, which sets it for that one command) avoids that one.
+- macOS has no equivalent of the non-dumpable flag here. The launcher's environment there is probably readable by your
+  other processes (`ps eww`); this was not tested.
 
 ## Verified
 
@@ -191,6 +205,8 @@ Run on Linux with Claude Code 2.1.295, against the live services:
 | That same session (Anthropic, OpenRouter, Anthropic) resumed with `claude-handoff local` on llama-swap (Qwen3.6 35B-A3B, llama.cpp) | Answered with the code word from the first Anthropic turn. Effort `xhigh` was sent as `enable_thinking: true`. Slow first turn (about 7 min on one 8 GB GPU with the experts on the CPU): Claude Code's prompt is long. |
 | Interactive session through `claude-handoff openrouter`: a message, `/model` set as default, `/exit` | Picker listed the real model id; `settings.json` was back to its previous default after exit, permissions unchanged; launcher exit code 0. |
 | Inside that session, the model ran `env \| grep -ciE 'openrouter\|sk-or-\|CLAUDE_HANDOFF_LOCAL'` | `0` |
+| Inside a session, a command read `/proc/<pid>/environ` of each process up the tree | Its shell and `claude`: no key. The launcher: `Permission denied`. The shells above it, which had the key exported: readable (see [Security](#security)). |
+| Standalone `proxy --host 127.0.0.2` | With token `200`, without `401`, `/v1/models/%2e%2e/%2e%2e/v1/credits` `404`, its `/proc/<pid>/environ` refused. |
 | Proxy log after these sessions | No refused request: Claude Code only used the three allowed endpoints. |
 | Session started on Anthropic, resumed by plain Claude Code through a LiteLLM 1.104 proxy (`anthropic/` model, OpenRouter as `api_base`) **without** the callback | `400 Invalid Anthropic Messages API request` |
 | The same, **with** `claude_handoff.litellm_callback.handler` | Answered with the code word from the Anthropic turn. |
@@ -198,10 +214,11 @@ Run on Linux with Claude Code 2.1.295, against the live services:
 | `claude-handoff local --url <LiteLLM> --no-thinking-toggle` with the master key in `CLAUDE_HANDOFF_LOCAL_API_KEY` | Answered. |
 
 The unit and integration tests (`python3 -m unittest discover -s tests -t .`) cover the normalizer; the proxy against
-a fake upstream (rewrites, credentials, token, `Origin` and `Host` checks, allowed endpoints, CORS headers, provider
-pinning, thinking toggle, streaming, upstream and internal errors, private log files); the transcript repair (dry run,
-backups, failures); and the launchers with a fake `claude` binary (arguments, no key in its environment, settings
-restore through symlinks, parallel sessions, SIGKILL recovery, exit codes, SIGTERM, Ctrl+C).
+a fake upstream (rewrites, credentials, token, `Origin` and `Host` checks, allowed endpoints and dot segments,
+non-object bodies, CORS headers, provider pinning, thinking toggle, streaming, upstream and internal errors, private
+log files); the transcript repair (dry run, backups, failures); and the launchers with a fake `claude` binary
+(arguments, no key in its environment, the launcher's `/proc/<pid>/environ` closed to it, settings restore through
+symlinks, parallel sessions, SIGKILL recovery, failed restores, exit codes, SIGTERM, Ctrl+C).
 
 ## Limitations
 

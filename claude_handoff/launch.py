@@ -1,6 +1,7 @@
 """Start Claude Code on a provider: proxy in a background thread, ``claude`` in the foreground."""
 
 import contextlib
+import ctypes
 import json
 import os
 import secrets
@@ -20,7 +21,10 @@ except ImportError:  # Windows: no lock, best effort
 
 PICKER_TIERS = ("OPUS", "SONNET", "HAIKU", "FABLE")
 # Credentials Claude Code must not inherit: the model can run `env` and read them into the conversation.
-SECRET_ENV = ("OPENROUTER_API_KEY", "CLAUDE_HANDOFF_LOCAL_API_KEY", "CLAUDE_HANDOFF_PROXY_TOKEN", "ANTHROPIC_API_KEY")
+SECRET_ENV = ("OPENROUTER_API_KEY", "CLAUDE_HANDOFF_LOCAL_API_KEY", "CLAUDE_HANDOFF_PROXY_TOKEN", "ANTHROPIC_API_KEY",
+              "CLAUDE_CODE_OAUTH_TOKEN")
+# Variables are also dropped when they hold the key under another name; short values ("1", "true") never match.
+MIN_SECRET_LENGTH = 16
 
 
 def claude_binary():
@@ -64,29 +68,32 @@ def restore_default_model(path, before, provider_models):
 
     Picking a model in ``/model`` writes it to settings.json. Left there, the next plain ``claude`` would start on
     a model Anthropic does not know. Only the ``model`` key is touched, and only if it now names one of the
-    provider models. Never raises: a failure here must not hide Claude Code's own exit.
+    provider models.
+
+    Returns ``"restored"``, ``"unchanged"`` (nothing to do) or ``"failed"``. Never raises: a failure here must not
+    hide Claude Code's own exit.
     """
     try:
         with open(path, encoding="utf-8") as file:
             data = json.load(file)
     except FileNotFoundError:
-        return False
+        return "unchanged"
     except (OSError, ValueError) as error:
         print(f"claude-handoff: could not read {path}: {error}", file=sys.stderr)
-        return False
+        return "failed"
     try:
         current = data.get("model") if isinstance(data, dict) else None
         if current == before or current not in provider_models:
-            return False
+            return "unchanged"
         if before is None:
             data.pop("model", None)
         else:
             data["model"] = before
         write_json_in_place(path, data)
-        return True
+        return "restored"
     except (OSError, ValueError) as error:
         print(f"claude-handoff: could not restore the default model in {path}: {error}", file=sys.stderr)
-        return False
+        return "failed"
 
 
 class DefaultModelGuard:
@@ -130,7 +137,8 @@ class DefaultModelGuard:
         os.replace(self.record + ".tmp", self.record)
 
     def _restore(self, data):
-        restore_default_model(self.settings, data.get("before"), set(data.get("models", [])))
+        """True if settings.json now holds no provider model; the record must stay until then."""
+        return restore_default_model(self.settings, data.get("before"), set(data.get("models", []))) != "failed"
 
     def _forget(self):
         with contextlib.suppress(OSError):
@@ -139,9 +147,8 @@ class DefaultModelGuard:
     def enter(self, models):
         with self._locked():
             data = self._load()
-            if data is not None and not data["pids"]:
-                # left by a launcher that was killed: repair, then start a fresh record
-                self._restore(data)
+            if data is not None and not data["pids"] and self._restore(data):
+                # left by a launcher that was killed, and now repaired: start a fresh record
                 self._forget()
                 data = None
             if data is None:
@@ -157,9 +164,9 @@ class DefaultModelGuard:
                 return
             data["pids"] = [pid for pid in data["pids"] if pid != os.getpid()]
             # Other launchers pass --model explicitly, so restoring now does not disturb them.
-            self._restore(data)
-            if data["pids"]:
-                self._save(data)
+            restored = self._restore(data)
+            if data["pids"] or not restored:
+                self._save(data)  # kept until the default is back, for the next launch or `anthropic`
             else:
                 self._forget()
 
@@ -169,8 +176,7 @@ class DefaultModelGuard:
             data = self._load()
             if data is None:
                 return
-            self._restore(data)
-            if not data["pids"]:
+            if self._restore(data) and not data["pids"]:
                 self._forget()
 
 
@@ -222,7 +228,7 @@ def claude_environment(base_url, token, model, capabilities=None, secrets_to_dro
     env = dict(os.environ)
     for name in SECRET_ENV:
         env.pop(name, None)
-    drop = {value for value in secrets_to_drop if value}
+    drop = {value for value in secrets_to_drop if value and len(value) >= MIN_SECRET_LENGTH}
     for name in [name for name, value in env.items() if value in drop]:
         del env[name]  # the same key exported under another name
     env["ANTHROPIC_BASE_URL"] = base_url
@@ -239,8 +245,24 @@ def claude_environment(base_url, token, model, capabilities=None, secrets_to_dro
     return env
 
 
+def protect_environment():
+    """Linux: make the launcher non-dumpable (``prctl(PR_SET_DUMPABLE, 0)``).
+
+    Claude Code and every command it runs share the user's account, so without this they could read the launcher's
+    ``/proc/<pid>/environ`` (where the API key is) or its memory (where the proxy keeps it). Non-dumpable, those files
+    belong to root. The flag does not survive ``execve``, so ``claude`` itself runs as usual. Returns whether it worked.
+    """
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        return ctypes.CDLL(None, use_errno=True).prctl(4, 0, 0, 0, 0) == 0  # 4 = PR_SET_DUMPABLE
+    except (OSError, AttributeError):
+        return False
+
+
 def run(config, model, models, claude_args, capabilities=None):
     """Run Claude Code through the proxy; returns its exit code."""
+    protect_environment()
     claude = claude_binary()
     guard = DefaultModelGuard(settings_path())
     model_ids = [model_id for model_id, _ in models]

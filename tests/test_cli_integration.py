@@ -14,6 +14,8 @@ from http.server import BaseHTTPRequestHandler
 
 from claude_handoff.proxy import LocalServer
 
+KEY = "fake-openrouter-key-for-tests"
+LOCAL_KEY = "fake-local-server-key-for-tests"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 FAKE_CLAUDE = textwrap.dedent("""\
@@ -26,9 +28,20 @@ FAKE_CLAUDE = textwrap.dedent("""\
         "argv": sys.argv[1:],
         "env": {{k: v for k, v in os.environ.items() if k.startswith(("ANTHROPIC_", "CLAUDE_CODE_"))}},
         "secret_names": sorted(k for k in os.environ if k in ("OPENROUTER_API_KEY", "CLAUDE_HANDOFF_LOCAL_API_KEY")),
-        "secret_values": sorted(k for k, v in os.environ.items() if v in ("sk-test", "local-secret")),
+        "secret_values": sorted(k for k, v in os.environ.items() if v in ("fake-openrouter-key-for-tests", "fake-local-server-key-for-tests")),
         "model_at_start": json.load(open(settings)).get("model"),
+        "pid": os.getpid(),
     }}
+    try:
+        with open("/proc/%d/environ" % os.getppid(), "rb") as file:
+            parent = file.read()
+        record["parent_environ"] = "readable"
+        record["parent_secrets"] = [v for v in ("fake-openrouter-key-for-tests", "fake-local-server-key-for-tests")
+                                    if v.encode() in parent]
+    except FileNotFoundError:
+        record["parent_environ"] = "unavailable"
+    except PermissionError:
+        record["parent_environ"] = "denied"
     if os.environ.get("FAKE_CLAUDE_CALL"):
         body = json.dumps({{"model": "m", "messages": [{{"role": "user", "content": "hi"}}, {{"role": "system", "content": "note"}}]}}).encode()
         url = os.environ["ANTHROPIC_BASE_URL"] + "/v1/messages"
@@ -139,7 +152,7 @@ class LauncherTest(unittest.TestCase):
 
     def test_openrouter_arguments_environment_and_restore(self):
         process = self.launch("openrouter", "-m", "a/model", "--models", "b/model=Model B", "--resume", "abc",
-                              OPENROUTER_API_KEY="sk-test", FAKE_CLAUDE_PICK="b/model", FAKE_CLAUDE_EXIT="3")
+                              OPENROUTER_API_KEY=KEY, FAKE_CLAUDE_PICK="b/model", FAKE_CLAUDE_EXIT="3")
         self.assertEqual(process.wait(timeout=20), 3)
         record = self.result()
         argv = record["argv"]
@@ -150,7 +163,7 @@ class LauncherTest(unittest.TestCase):
                                              {"model": "b/model", "label": "Model B"}])
         env = record["env"]
         self.assertTrue(env["ANTHROPIC_BASE_URL"].startswith("http://127.0.0.1:"))
-        self.assertNotEqual(env["ANTHROPIC_AUTH_TOKEN"], "sk-test")  # the key stays in the proxy
+        self.assertNotEqual(env["ANTHROPIC_AUTH_TOKEN"], KEY)  # the key stays in the proxy
         self.assertEqual(env["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "a/model")
         self.assertGreaterEqual(len(env["ANTHROPIC_AUTH_TOKEN"]), 32)  # a random token per launch
         self.assertEqual(record["secret_names"], [])
@@ -161,7 +174,7 @@ class LauncherTest(unittest.TestCase):
     def test_local_lists_served_models_and_proxies(self):
         server = FakeServer()
         self.addCleanup(server.close)
-        process = self.launch("local", "--url", server.url, "-p", "hello", CLAUDE_HANDOFF_LOCAL_API_KEY="local-secret",
+        process = self.launch("local", "--url", server.url, "-p", "hello", CLAUDE_HANDOFF_LOCAL_API_KEY=LOCAL_KEY,
                               FAKE_CLAUDE_PICK="other-local", FAKE_CLAUDE_CALL="1")
         self.assertEqual(process.wait(timeout=20), 0)
         record = self.result()
@@ -173,7 +186,7 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(record["response"]["id"], "local-msg")
         self.assertEqual(record["without_token"], 401)
         self.assertEqual(len(server.requests), 1)  # the request without token never reached the server
-        self.assertEqual(server.requests[0]["headers"].get("Authorization"), "Bearer local-secret")
+        self.assertEqual(server.requests[0]["headers"].get("Authorization"), "Bearer " + LOCAL_KEY)
         self.assertEqual(record["secret_names"], [])
         self.assertEqual(record["secret_values"], [])
         sent = server.requests[0]["body"]
@@ -187,7 +200,7 @@ class LauncherTest(unittest.TestCase):
         self.assertFalse(os.path.exists(self.out))
 
     def test_sigterm_reaches_claude_and_settings_are_restored(self):
-        process = self.launch("openrouter", OPENROUTER_API_KEY="sk-test", FAKE_CLAUDE_PICK="deepseek/deepseek-v4.1-flash",
+        process = self.launch("openrouter", OPENROUTER_API_KEY=KEY, FAKE_CLAUDE_PICK="deepseek/deepseek-v4.1-flash",
                               FAKE_CLAUDE_SLEEP="1")
         self.wait_ready()
         process.send_signal(signal.SIGTERM)
@@ -195,7 +208,7 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(self.settings()["model"], "opus")
 
     def test_ctrl_c_goes_to_claude_not_the_launcher(self):
-        process = self.launch("openrouter", OPENROUTER_API_KEY="sk-test", FAKE_CLAUDE_PICK="deepseek/deepseek-v4.1-flash",
+        process = self.launch("openrouter", OPENROUTER_API_KEY=KEY, FAKE_CLAUDE_PICK="deepseek/deepseek-v4.1-flash",
                               FAKE_CLAUDE_SLEEP="1")
         self.wait_ready()
         os.killpg(process.pid, signal.SIGINT)  # what the terminal does on Ctrl+C: the whole foreground group
@@ -204,7 +217,7 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(self.settings()["model"], "opus")
 
     def test_sigkill_is_repaired_by_anthropic(self):
-        process = self.launch("openrouter", OPENROUTER_API_KEY="sk-test", FAKE_CLAUDE_PICK="deepseek/deepseek-v4.1-flash",
+        process = self.launch("openrouter", OPENROUTER_API_KEY=KEY, FAKE_CLAUDE_PICK="deepseek/deepseek-v4.1-flash",
                               FAKE_CLAUDE_SLEEP="1")
         self.wait_ready()
         os.killpg(process.pid, signal.SIGKILL)  # nothing can run in the launcher now
@@ -217,7 +230,7 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(self.result()["argv"], ["--version"])
 
     def test_sigkill_is_repaired_by_the_next_launch(self):
-        process = self.launch("openrouter", OPENROUTER_API_KEY="sk-test", FAKE_CLAUDE_PICK="deepseek/deepseek-v4.1-flash",
+        process = self.launch("openrouter", OPENROUTER_API_KEY=KEY, FAKE_CLAUDE_PICK="deepseek/deepseek-v4.1-flash",
                               FAKE_CLAUDE_SLEEP="1")
         self.wait_ready()
         os.killpg(process.pid, signal.SIGKILL)
@@ -230,6 +243,22 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(process.wait(timeout=20), 0)
         self.assertEqual(self.result()["model_at_start"], "opus")
         self.assertEqual(self.settings()["model"], "opus")
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "uses /proc and prctl")
+    def test_launcher_environment_is_not_readable_by_claude(self):
+        process = self.launch("openrouter", OPENROUTER_API_KEY=KEY, FAKE_CLAUDE_PICK="deepseek/deepseek-v4.1-flash",
+                              FAKE_CLAUDE_SLEEP="1")
+        self.wait_ready()
+        record = self.result()
+        self.assertEqual(record["parent_environ"], "denied")  # what `tr '\\0' '\\n' < /proc/$PPID/environ` would hit
+        with self.assertRaises(PermissionError):
+            with open(f"/proc/{process.pid}/environ", "rb") as file:
+                file.read()
+        # claude itself is unaffected: execve reset the flag, its own environment stays readable as usual
+        with open(f"/proc/{record['pid']}/environ", "rb") as file:
+            own = file.read()
+        self.assertIn(b"ANTHROPIC_BASE_URL=", own)
+        self.assertNotIn(KEY.encode(), own)
 
 
 if __name__ == "__main__":

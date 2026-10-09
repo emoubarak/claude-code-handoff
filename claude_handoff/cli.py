@@ -202,6 +202,7 @@ def cmd_proxy(args):
         log_path=options.log or os.path.join(proxy.state_dir(), "proxy.log"),
         dump_path=options.dump,
     )
+    launch.protect_environment()  # this process holds the key: keep other processes of the user out of it
     try:
         proxy.serve(config, options.host, options.port, allow_remote=options.allow_remote)
     except ValueError as error:

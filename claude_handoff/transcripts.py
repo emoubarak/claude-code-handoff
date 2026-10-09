@@ -160,8 +160,7 @@ def fix_all(root=None, stamp=None, quiet=False, dry_run=False, backup_dir=None):
     if run_dir and total and not dry_run:
         _prune_backups(backup_dir)
     if stamp and not dry_run and not failed:
-        os.makedirs(os.path.dirname(stamp), exist_ok=True)
-        with open(stamp, "a"):
-            pass
+        os.makedirs(os.path.dirname(stamp), mode=0o700, exist_ok=True)
+        os.close(os.open(stamp, os.O_WRONLY | os.O_CREAT, 0o600))
         os.utime(stamp, (started, started))
     return total

@@ -4,3 +4,4 @@ build/
 dist/
 .venv/
 *.dump.jsonl
+uv.lock
